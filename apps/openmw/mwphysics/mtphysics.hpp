@@ -8,6 +8,7 @@
 #include <set>
 #include <shared_mutex>
 #include <thread>
+#include <unordered_map>
 #include <unordered_set>
 
 #include <BulletCollision/CollisionDispatch/btCollisionWorld.h>
@@ -80,6 +81,29 @@ namespace MWPhysics
         void updateActorsPositions();
         bool hasLineOfSight(const Actor* actor1, const Actor* actor2);
         void refreshLOSCache();
+        struct LOSCacheKey
+        {
+            const Actor* mActor1;
+            const Actor* mActor2;
+
+            bool operator==(const LOSCacheKey& other) const
+            {
+                return mActor1 == other.mActor1 && mActor2 == other.mActor2;
+            }
+        };
+
+        struct LOSCacheKeyHasher
+        {
+            std::size_t operator()(const LOSCacheKey& key) const noexcept
+            {
+                const auto ptr1 = reinterpret_cast<std::size_t>(key.mActor1);
+                const auto ptr2 = reinterpret_cast<std::size_t>(key.mActor2);
+                return ptr1 ^ (ptr2 + 0x9e3779b97f4a7c15ULL + (ptr1 << 6) + (ptr1 >> 2));
+            }
+        };
+
+        LOSCacheKey makeLOSCacheKey(const LOSRequest& request) const;
+        void rebuildLOSCacheIndex();
         void updateAabbs();
         void updatePtrAabb(const std::shared_ptr<PtrHolder>& ptr);
         void updateStats(osg::Timer_t frameStart, unsigned int frameNumber, osg::Stats& stats);
@@ -101,6 +125,7 @@ namespace MWPhysics
         btCollisionWorld* mCollisionWorld;
         MWRender::DebugDrawer* mDebugDrawer;
         std::vector<LOSRequest> mLOSCache;
+        std::unordered_map<LOSCacheKey, std::size_t, LOSCacheKeyHasher> mLOSCacheIndex;
         std::set<std::weak_ptr<PtrHolder>, std::owner_less<std::weak_ptr<PtrHolder>>> mUpdateAabb;
 
         // TODO: use std::experimental::flex_barrier or std::barrier once it becomes a thing
@@ -116,6 +141,10 @@ namespace MWPhysics
         bool mAdvanceSimulation;
         std::atomic<int> mNextJob;
         std::atomic<int> mNextLOS;
+        std::atomic<unsigned int> mLOSCacheHits;
+        std::atomic<unsigned int> mLOSCacheMisses;
+        unsigned int mLOSCacheHitsLastFrame;
+        unsigned int mLOSCacheMissesLastFrame;
         std::vector<std::thread> mThreads;
 
         mutable std::shared_mutex mSimulationMutex;

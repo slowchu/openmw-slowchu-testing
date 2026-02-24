@@ -1,7 +1,9 @@
 #include "actors.hpp"
 
 #include <array>
+#include <cmath>
 #include <optional>
+#include <unordered_map>
 
 #include <components/esm3/esmreader.hpp>
 #include <components/esm3/esmwriter.hpp>
@@ -1530,6 +1532,42 @@ namespace MWMechanics
             }
             const int actorsProcessingRange = Settings::game().mActorsProcessingRange;
 
+            struct CombatBinKey
+            {
+                int mX;
+                int mY;
+
+                bool operator==(const CombatBinKey& other) const
+                {
+                    return mX == other.mX && mY == other.mY;
+                }
+            };
+
+            struct CombatBinKeyHasher
+            {
+                std::size_t operator()(const CombatBinKey& key) const noexcept
+                {
+                    return (static_cast<std::size_t>(static_cast<unsigned int>(key.mX)) << 32)
+                        ^ static_cast<unsigned int>(key.mY);
+                }
+            };
+
+            const float combatBinSize = static_cast<float>(std::max(1, actorsProcessingRange));
+            std::unordered_map<CombatBinKey, std::vector<const Actor*>, CombatBinKeyHasher> combatBins;
+            combatBins.reserve(mActors.size());
+            const auto toCombatBin = [combatBinSize](const osg::Vec3f& position)
+            {
+                return CombatBinKey{ static_cast<int>(std::floor(position.x() / combatBinSize)),
+                    static_cast<int>(std::floor(position.y() / combatBinSize)) };
+            };
+
+            for (const Actor& actor : mActors)
+            {
+                if (actor.isInvalid())
+                    continue;
+                combatBins[toCombatBin(actor.getPtr().getRefData().getPosition().asVec3())].push_back(&actor);
+            }
+
             // AI and magic effects update
             for (Actor& actor : mActors)
             {
@@ -1594,14 +1632,26 @@ namespace MWMechanics
                             if (!isPlayer)
                                 adjustCommandedActor(actor.getPtr());
 
-                            for (const Actor& otherActor : mActors)
+                            if (!isPlayer)
                             {
-                                if (otherActor.isInvalid())
-                                    continue;
-                                if (otherActor.getPtr() == actor.getPtr() || isPlayer) // player is not AI-controlled
-                                    continue;
-                                engageCombat(
-                                    actor.getPtr(), otherActor.getPtr(), cachedAllies, otherActor.getPtr() == player);
+                                const osg::Vec3f actorPosition = actor.getPtr().getRefData().getPosition().asVec3();
+                                const CombatBinKey actorBin = toCombatBin(actorPosition);
+                                for (int dx = -1; dx <= 1; ++dx)
+                                {
+                                    for (int dy = -1; dy <= 1; ++dy)
+                                    {
+                                        const auto found = combatBins.find(CombatBinKey{ actorBin.mX + dx, actorBin.mY + dy });
+                                        if (found == combatBins.end())
+                                            continue;
+                                        for (const Actor* otherActor : found->second)
+                                        {
+                                            const MWWorld::Ptr otherPtr = otherActor->getPtr();
+                                            if (otherPtr == actor.getPtr())
+                                                continue;
+                                            engageCombat(actor.getPtr(), otherPtr, cachedAllies, otherPtr == player);
+                                        }
+                                    }
+                                }
                             }
                         }
                         if (mTimerUpdateHeadTrack == 0)

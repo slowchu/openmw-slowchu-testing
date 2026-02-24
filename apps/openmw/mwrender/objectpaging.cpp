@@ -556,6 +556,7 @@ namespace MWRender
                     const ESM::Cell* cell = store.get<ESM::Cell>().searchStatic(cellX, cellY);
                     if (!cell)
                         continue;
+                    const std::set<ESM::RefNum> movedRefs(cell->mMovedRefs.begin(), cell->mMovedRefs.end());
                     for (size_t i = 0; i < cell->mContextList.size(); ++i)
                     {
                         try
@@ -573,8 +574,7 @@ namespace MWRender
                                 if (moved)
                                     continue;
 
-                                if (std::find(cell->mMovedRefs.begin(), cell->mMovedRefs.end(), ref.mRefNum)
-                                    != cell->mMovedRefs.end())
+                                if (movedRefs.find(ref.mRefNum) != movedRefs.end())
                                     continue;
 
                                 int type = store.findStatic(ref.mRefID);
@@ -715,6 +715,13 @@ namespace MWRender
 
         AnalyzeVisitor analyzeVisitor(copyMask);
         const float minSize = mMinSizeMergeFactor ? mMinSize * mMinSizeMergeFactor : mMinSize;
+        std::set<ESM::RefNum> disabledRefs;
+        if (!activeGrid)
+        {
+            std::lock_guard<std::mutex> lock(mRefTrackerMutex);
+            disabledRefs = getRefTracker().mDisabled;
+        }
+        std::vector<std::pair<ESM::RefNum, float>> deferredSizeCacheWrites;
         for (const auto& [refNum, ref] : refs)
         {
             if (size < 1.f)
@@ -788,17 +795,13 @@ namespace MWRender
                     refnumSet->mRefnums.push_back(refNum);
             }
 
-            {
-                std::lock_guard<std::mutex> lock(mRefTrackerMutex);
-                if (getRefTracker().mDisabled.count(refNum))
-                    continue;
-            }
+            if (disabledRefs.count(refNum))
+                continue;
 
             const float radius2 = cnode->getBound().radius2() * ref.mScale * ref.mScale;
             if (radius2 < dSqr * minSize * minSize && !activeGrid)
             {
-                std::lock_guard<std::mutex> lock(mSizeCacheMutex);
-                mSizeCache[refNum] = radius2;
+                deferredSizeCacheWrites.emplace_back(refNum, radius2);
                 continue;
             }
 
@@ -815,6 +818,13 @@ namespace MWRender
             else
                 analyzeVisitor.addInstance(emplaced.first->second.mAnalyzeResult);
             emplaced.first->second.mInstances.push_back(&ref);
+        }
+
+        if (!deferredSizeCacheWrites.empty())
+        {
+            std::lock_guard<std::mutex> lock(mSizeCacheMutex);
+            for (const auto& [refNum, radius2] : deferredSizeCacheWrites)
+                mSizeCache[refNum] = radius2;
         }
 
         const osg::Vec3f worldCenter
