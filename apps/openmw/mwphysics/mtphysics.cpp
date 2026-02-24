@@ -414,6 +414,10 @@ namespace MWPhysics
         , mAdvanceSimulation(false)
         , mNextJob(0)
         , mNextLOS(0)
+        , mLOSCacheHits(0)
+        , mLOSCacheMisses(0)
+        , mLOSCacheHitsLastFrame(0)
+        , mLOSCacheMissesLastFrame(0)
         , mFrameNumber(0)
         , mTimer(osg::Timer::instance())
         , mPrevStepCount(1)
@@ -678,21 +682,40 @@ namespace MWPhysics
         }
     }
 
+    PhysicsTaskScheduler::LOSCacheKey PhysicsTaskScheduler::makeLOSCacheKey(const LOSRequest& request) const
+    {
+        return LOSCacheKey{ request.mRawActors[0], request.mRawActors[1] };
+    }
+
+    void PhysicsTaskScheduler::rebuildLOSCacheIndex()
+    {
+        mLOSCacheIndex.clear();
+        mLOSCacheIndex.reserve(mLOSCache.size());
+        for (std::size_t i = 0; i < mLOSCache.size(); ++i)
+            mLOSCacheIndex.emplace(makeLOSCacheKey(mLOSCache[i]), i);
+    }
+
     bool PhysicsTaskScheduler::getLineOfSight(
         const std::shared_ptr<Actor>& actor1, const std::shared_ptr<Actor>& actor2)
     {
         MaybeExclusiveLock lock(mLOSCacheMutex, mLockingPolicy);
 
         auto req = LOSRequest(actor1, actor2);
-        auto result = std::find(mLOSCache.begin(), mLOSCache.end(), req);
-        if (result == mLOSCache.end())
+        const LOSCacheKey key = makeLOSCacheKey(req);
+        const auto found = mLOSCacheIndex.find(key);
+        if (found == mLOSCacheIndex.end())
         {
             req.mResult = hasLineOfSight(actor1.get(), actor2.get());
+            mLOSCacheIndex.emplace(key, mLOSCache.size());
             mLOSCache.push_back(req);
+            ++mLOSCacheMisses;
             return req.mResult;
         }
-        result->mAge = 0;
-        return result->mResult;
+
+        LOSRequest& cached = mLOSCache[found->second];
+        cached.mAge = 0;
+        ++mLOSCacheHits;
+        return cached.mResult;
     }
 
     void PhysicsTaskScheduler::refreshLOSCache()
@@ -805,6 +828,9 @@ namespace MWPhysics
             stats.setAttribute(mFrameNumber, "physicsworker_time_begin", mTimer->delta_s(mFrameStart, mTimeBegin));
             stats.setAttribute(mFrameNumber, "physicsworker_time_taken", mTimer->delta_s(mTimeBegin, mTimeEnd));
             stats.setAttribute(mFrameNumber, "physicsworker_time_end", mTimer->delta_s(mFrameStart, mTimeEnd));
+            stats.setAttribute(mFrameNumber, "physicsworker_los_cache_size", static_cast<double>(mLOSCache.size()));
+            stats.setAttribute(mFrameNumber, "physicsworker_los_cache_hits", static_cast<double>(mLOSCacheHitsLastFrame));
+            stats.setAttribute(mFrameNumber, "physicsworker_los_cache_misses", static_cast<double>(mLOSCacheMissesLastFrame));
         }
         mFrameStart = frameStart;
         mTimeBegin = mTimer->tick();
@@ -861,11 +887,14 @@ namespace MWPhysics
 
     void PhysicsTaskScheduler::afterPostSim()
     {
+        mLOSCacheHitsLastFrame = mLOSCacheHits.exchange(0, std::memory_order_relaxed);
+        mLOSCacheMissesLastFrame = mLOSCacheMisses.exchange(0, std::memory_order_relaxed);
         {
             MaybeExclusiveLock lock(mLOSCacheMutex, mLockingPolicy);
             mLOSCache.erase(
                 std::remove_if(mLOSCache.begin(), mLOSCache.end(), [](const LOSRequest& req) { return req.mStale; }),
                 mLOSCache.end());
+            rebuildLOSCacheIndex();
         }
         mTimeEnd = mTimer->tick();
         if (mWorkersSync != nullptr)
